@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "log-analytics"
+version = "0.1.0"
+description = "Apache log analytics — statistical breakdowns by Country, OS, and Browser"
+requires-python = ">=3.10"
+dependencies = [
+    "apache-log-parser",
+    "ua-parser[regex]",
+    "geoip2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+log-analytics = "log_analytics.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["log_analytics*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires GeoLite2 DB and network-resolved data",
+]

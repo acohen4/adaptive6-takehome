@@ -8,7 +8,7 @@ Build a module that reads an Apache Web Server log file and outputs a statistica
 
 - **Usability** — clean API surface; easy to call, easy to read output → [Public API](#32-public-api)
 - **Simplicity** — a linear pipeline is the simplest model for single-pass analytics; O(1) memory is a bonus → [Data Flow Model](#41-data-flow-model)
-- **Extensibility** — adding a new dimension or output format should be a one-function change → [Extension Strategy](#43-extension-strategy-adding-new-dimensions), [Output Formats](#44-output-format-extensibility)
+- **Extensibility** — adding a new dimension should be a one-function change → [Extension Strategy](#43-extension-strategy-adding-new-dimensions)
 - **Reliability** — errors are handled explicitly and surfaced, never silently swallowed → [Error Boundary Placement](#42-error-boundary-placement)
 
 ## 3. Interfaces & Data Structures
@@ -48,18 +48,17 @@ ExtractorMap = dict[str, Extractor]
 ### 3.2 Public API
 
 ```python
-Formatter = Callable[[FullReport], str]
+CountryLookup = Callable[[str], str]
 
 def analyze(
     source: IO[str],
-    geoip_db: str,
+    country_lookup: CountryLookup,
     dest: IO[str] = sys.stdout,
     extractors: ExtractorMap = DEFAULT_EXTRACTORS,
-    formatter: Formatter = format_report,
 ) -> FullReport:
 ```
 
-Single entry point. `source`/`dest` are streams (tests pass `StringIO`); `geoip_db` is a path because the MaxMind reader manages its own file handle. `formatter` can be swapped (see [Output Format Extensibility](#44-output-format-extensibility)).
+Single entry point. `country_lookup` is a callback that maps an IP to a country name — the caller owns the GeoIP reader lifecycle (see [GeoIP Dependency Injection](#44-geoip-dependency-injection)).
 
 ### 3.3 Pipeline Stages
 
@@ -67,29 +66,20 @@ Each stage has a single responsibility and communicates through the types above.
 
 ```python
 read_lines(source: IO[str]) -> Iterable[str]
-make_parser(geoip_db: str) -> Callable[[str], LogSummary | None]
+parse_line(raw: str, country_lookup: CountryLookup) -> LogSummary | None
 accumulate(records: Iterable[LogSummary | None], extractors: ExtractorMap) -> FullReport
 format_report(report: FullReport) -> str
 ```
 
-`make_parser` is a factory: it opens the MaxMind DB and creates the UA parser once, then returns a `parse_line` closure that captures both. Tests can swap in a mock reader without global state.
-
-```python
-def make_parser(geoip_db: str) -> Callable[[str], LogSummary | None]:
-    reader = geoip2.database.Reader(geoip_db)
-    ua = ua_parser.Parser()   # stateless, no config needed
-    def parse_line(raw: str) -> LogSummary | None:
-        ...  # uses reader and ua via closure
-    return parse_line
-```
+`parse_line` receives a `country_lookup` callback rather than owning a GeoIP reader. The caller (typically `analyze`, which gets it from `__main__`) controls reader creation and lifecycle. Tests pass a stub: `lambda ip: {"1.2.3.4": "Germany"}.get(ip, "Unknown")`.
 
 `format_report` sorts each dimension's entries by count descending and formats percentages to two decimal places (`f"{pct:.2f}%"`), matching the required output spec.
 
 ### 3.4 Exported Surface
 
-**Public:** `analyze`, all dataclasses/type aliases, `DEFAULT_EXTRACTORS`.
+**Public:** `analyze`, `make_country_lookup`, all dataclasses/type aliases, `DEFAULT_EXTRACTORS`.
 
-**Advanced:** `make_parser`, `accumulate`, `format_report` — for testing and custom pipelines. `read_lines` is internal.
+**Advanced:** `parse_line`, `accumulate`, `format_report` — for testing and custom pipelines.
 
 ## 4. Design Dimensions
 
@@ -98,15 +88,16 @@ def make_parser(geoip_db: str) -> Callable[[str], LogSummary | None]:
 **Decision:** Linear streaming pipeline, no shared mutable state.
 
 ```
-┌────────────┐    ┌────────────┐    ┌─────────────┐    ┌───────────────┐    ┌──────┐
+                                    country_lookup
+                                        │
+┌────────────┐    ┌────────────┐    ┌───▼─────────┐    ┌───────────────┐    ┌──────┐
 │ log file   │───▶│ read_lines │───▶│ parse_line  │───▶│  accumulate   │───▶│format│
 │ (IO[str])  │    │ Iterable   │    │ LogSummary? │    │  FullReport   │    │report│
 └────────────┘    │ [str]      │    │             │    │               │    └──┬───┘
-                  └────────────┘    │ ┌─────────┐ │    │ ExtractorMap  │       │
-                                    │ │GeoIP DB │ │    │ drives which  │       ▼
-                                    │ │UA parser│ │    │ dims to count │    dest
-                                    │ └─────────┘ │    └───────────────┘  (IO[str])
-                                    └─────────────┘
+                  └────────────┘    └─────────────┘    │ ExtractorMap  │       │
+                                                       │ drives which  │       ▼
+                                                       │ dims to count │    dest
+                                                       └───────────────┘  (IO[str])
 ```
 
 | Option | Pros | Cons |
@@ -149,39 +140,34 @@ Adding a "Method" dimension requires three localized edits, zero pipeline change
 # 1. Add field to LogSummary
 # 2. Populate it in parse_line
 # 3. Register the extractor:
-analyze(source, geoip_db, extractors={**DEFAULT_EXTRACTORS, "Method": lambda s: s.method})
+analyze(source, country_lookup, extractors={**DEFAULT_EXTRACTORS, "Method": lambda s: s.method})
 ```
 
 If extractor composition becomes common, a `with_extractors(extras, base=DEFAULT_EXTRACTORS)` helper could make it more ergonomic — but `{**DEFAULT_EXTRACTORS, ...}` is clear enough for v1.
 
-### 4.4 Output Format Extensibility
+### 4.4 GeoIP Dependency Injection
 
-**Decision:** `Formatter = Callable[[FullReport], str]` — same pattern as `ExtractorMap`.
+**Decision:** `country_lookup` callback — `parse_line` and `analyze` receive a `Callable[[str], str]` instead of owning a GeoIP reader.
 
-The default `format_report` produces the required plain-text output (sorted descending, two decimal places). Alternative formatters can be passed to `analyze` or selected via CLI flag:
-
-```python
-def format_json(report: FullReport) -> str: ...
-def format_csv(report: FullReport) -> str: ...
-```
+A `make_country_lookup(db_path)` factory opens the MaxMind DB and returns a closure. The CLI creates it; tests substitute a stub dict.
 
 | Option | Pros | Cons |
 |---|---|---|
-| **Callable formatter (chosen)** | Trivial to add, matches extractor pattern | No formal interface to enforce |
-| Template engine (Jinja2) | Flexible layouts | Heavy for tabular stats |
-| Subclass / strategy object | Formal interface | Overkill for `FullReport -> str` |
+| Global singleton + env var | Zero-arg `analyze()` calls | Import-order sensitive, hard to test in parallel, hidden state |
+| `make_parser` factory (returns closure) | No global state, self-contained | Extra abstraction layer for one dependency |
+| **`country_lookup` callback (chosen)** | Minimal API surface, tests already use it, caller owns lifecycle | GeoIP setup leaks to the call site |
 
-Adding a new output format means writing one function with signature `FullReport -> str` — no pipeline changes.
+The callback won over the factory because `parse_line` already needed a `country_lookup` parameter for testability — promoting it to `analyze`'s signature removes all global state with no new abstractions.
 
 ### 4.5 CLI Entry Point
 
 A thin `__main__.py` wires up argument parsing and calls `analyze`:
 
 ```
-python -m log_analyzer apache_log.txt --geoip-db GeoLite2-Country.mmdb [--format json]
+python -m log_analytics apache_log.txt --db GeoLite2-Country.mmdb
 ```
 
-The CLI parses args, opens files, picks a formatter, and delegates to `analyze`.
+The CLI parses args, opens files, creates the `country_lookup`, and delegates to `analyze`.
 
 ### 4.6 Parsing Strategy
 
