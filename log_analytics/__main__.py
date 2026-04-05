@@ -18,13 +18,20 @@ def main(argv: list[str] | None = None) -> None:
         default=str(DEFAULT_DB_PATH),
         help="Path to GeoLite2-Country.mmdb (default: data/GeoLite2-Country.mmdb)",
     )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Show only the top N entries per dimension; remaining entries are rolled into 'Other'.",
+    )
     args = parser.parse_args(argv)
 
     country_lookup = make_country_lookup(args.db)
 
     try:
         with open(args.logfile, encoding="utf-8") as fh:
-            analyze(fh, country_lookup=country_lookup)
+            analyze(fh, country_lookup=country_lookup, top_n=args.top_n)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

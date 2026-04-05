@@ -49,6 +49,21 @@ def accumulate(
     return FullReport(dimensions=dimensions, errors=errors)
 
 
+def truncate_report(report: FullReport, top_n: int) -> FullReport:
+    """Keep only the *top_n* entries per dimension, rolling the rest into "Other"."""
+    truncated: dict[str, CategoryBreakdown] = {}
+    for name, breakdown in report.dimensions.items():
+        sorted_items = sorted(
+            breakdown.counts.items(), key=lambda kv: kv[1], reverse=True
+        )
+        top = dict(sorted_items[:top_n])
+        rest_total = sum(count for _, count in sorted_items[top_n:])
+        if rest_total > 0:
+            top["Other"] = top.get("Other", 0) + rest_total
+        truncated[name] = CategoryBreakdown(counts=top, total=breakdown.total)
+    return FullReport(dimensions=truncated, errors=report.errors)
+
+
 def format_report(report: FullReport) -> str:
     sections: list[str] = []
 
@@ -71,9 +86,12 @@ def analyze(
     dest: IO[str] = sys.stdout,
     extractors: ExtractorMap = DEFAULT_EXTRACTORS,
     formatter: Formatter = format_report,
+    top_n: int | None = None,
 ) -> FullReport:
     records = (parse_line(line, country_lookup=country_lookup) for line in read_lines(source))
     report = accumulate(records, extractors)
+    if top_n is not None:
+        report = truncate_report(report, top_n)
     dest.write(formatter(report))
     dest.write("\n")
     return report

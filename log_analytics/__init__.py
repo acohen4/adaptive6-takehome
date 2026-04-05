@@ -15,6 +15,7 @@ from .pipeline import (
     analyze,
     format_report,
     read_lines,
+    truncate_report,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "format_report",
     "make_country_lookup",
     "parse_line",
+    "truncate_report",
 ]

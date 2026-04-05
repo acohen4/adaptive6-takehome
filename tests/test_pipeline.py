@@ -7,6 +7,7 @@ from log_analytics.pipeline import (
     accumulate,
     format_report,
     read_lines,
+    truncate_report,
 )
 from log_analytics.types import CategoryBreakdown, FullReport, LogSummary
 
@@ -122,3 +123,91 @@ class TestFormatReport:
         assert "Country:" in text
         assert "OS:" in text
         assert "Browser:" in text
+
+
+class TestTruncateReport:
+    @staticmethod
+    def _make_report(counts: dict[str, int]) -> FullReport:
+        total = sum(counts.values())
+        return FullReport(
+            dimensions={"Dim": CategoryBreakdown(counts=counts, total=total)},
+            errors=0,
+        )
+
+    def test_keeps_top_n_and_rolls_up_rest(self):
+        report = self._make_report({"A": 10, "B": 5, "C": 3, "D": 2})
+        result = truncate_report(report, top_n=2)
+
+        dim = result.dimensions["Dim"]
+        assert dim.counts["A"] == 10
+        assert dim.counts["B"] == 5
+        assert dim.counts["Other"] == 5
+        assert len(dim.counts) == 3
+        assert dim.total == 20
+
+    def test_top_n_exceeds_entries(self):
+        report = self._make_report({"A": 3, "B": 1})
+        result = truncate_report(report, top_n=10)
+
+        dim = result.dimensions["Dim"]
+        assert dim.counts == {"A": 3, "B": 1}
+        assert "Other" not in dim.counts
+        assert dim.total == 4
+
+    def test_top_n_equals_entries(self):
+        report = self._make_report({"A": 3, "B": 1})
+        result = truncate_report(report, top_n=2)
+
+        dim = result.dimensions["Dim"]
+        assert dim.counts == {"A": 3, "B": 1}
+        assert "Other" not in dim.counts
+
+    def test_top_n_zero(self):
+        report = self._make_report({"A": 3, "B": 1})
+        result = truncate_report(report, top_n=0)
+
+        dim = result.dimensions["Dim"]
+        assert dim.counts == {"Other": 4}
+        assert dim.total == 4
+
+    def test_merges_natural_other(self):
+        """A pre-existing 'Other' that falls outside top-N is merged, not duplicated."""
+        report = self._make_report({"Chrome": 10, "Firefox": 5, "Other": 2, "Edge": 1})
+        result = truncate_report(report, top_n=2)
+
+        dim = result.dimensions["Dim"]
+        assert dim.counts["Chrome"] == 10
+        assert dim.counts["Firefox"] == 5
+        assert dim.counts["Other"] == 3
+        assert len(dim.counts) == 3
+
+    def test_natural_other_in_top_n(self):
+        """A pre-existing 'Other' that ranks within top-N stays untouched."""
+        report = self._make_report({"Chrome": 10, "Other": 8, "Edge": 1})
+        result = truncate_report(report, top_n=2)
+
+        dim = result.dimensions["Dim"]
+        assert dim.counts["Chrome"] == 10
+        assert dim.counts["Other"] == 8 + 1
+        assert len(dim.counts) == 2
+
+    def test_preserves_errors(self):
+        report = FullReport(
+            dimensions={"Dim": CategoryBreakdown(counts={"A": 1}, total=1)},
+            errors=42,
+        )
+        result = truncate_report(report, top_n=1)
+        assert result.errors == 42
+
+    def test_multiple_dimensions(self):
+        report = FullReport(
+            dimensions={
+                "OS": CategoryBreakdown(counts={"Linux": 5, "Mac": 3, "Win": 1}, total=9),
+                "Browser": CategoryBreakdown(counts={"Chrome": 7, "FF": 2, "Edge": 1}, total=10),
+            },
+            errors=0,
+        )
+        result = truncate_report(report, top_n=1)
+
+        assert result.dimensions["OS"].counts == {"Linux": 5, "Other": 4}
+        assert result.dimensions["Browser"].counts == {"Chrome": 7, "Other": 3}

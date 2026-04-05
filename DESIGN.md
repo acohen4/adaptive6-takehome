@@ -58,10 +58,11 @@ def analyze(
     dest: IO[str] = sys.stdout,
     extractors: ExtractorMap = DEFAULT_EXTRACTORS,
     formatter: Formatter = format_report,
+    top_n: int | None = None,
 ) -> FullReport:
 ```
 
-Single entry point. `country_lookup` is a callback that maps an IP to a country name — the caller owns the GeoIP reader lifecycle (see [GeoIP Dependency Injection](#45-geoip-dependency-injection)). `formatter` controls output serialisation; the default produces the human-readable text format (see [Formatter Extensibility](#44-formatter-extensibility)).
+Single entry point. `country_lookup` is a callback that maps an IP to a country name — the caller owns the GeoIP reader lifecycle (see [GeoIP Dependency Injection](#45-geoip-dependency-injection)). `formatter` controls output serialisation; the default produces the human-readable text format (see [Formatter Extensibility](#44-formatter-extensibility)). `top_n`, when set, keeps only the N highest-count entries per dimension and rolls the remainder into an "Other" bucket (see [Top-N Truncation](#46-top-n-truncation)).
 
 ### 3.3 Pipeline Stages
 
@@ -79,7 +80,7 @@ format_report(report: FullReport) -> str
 
 **Public:** `analyze`, `make_country_lookup`, all dataclasses/type aliases, `DEFAULT_EXTRACTORS`, `Formatter`.
 
-**Advanced:** `parse_line`, `accumulate`, `format_report` (the default `Formatter`) — for testing and custom pipelines.
+**Advanced:** `parse_line`, `accumulate`, `truncate_report`, `format_report` (the default `Formatter`) — for testing and custom pipelines.
 
 ## 4. Design Dimensions
 
@@ -195,9 +196,21 @@ A thin `__main__.py` wires up argument parsing and calls `analyze`:
 python -m log_analytics apache_log.txt --db GeoLite2-Country.mmdb
 ```
 
-The CLI parses args, opens files, creates the `country_lookup`, and delegates to `analyze`.
+The CLI parses args, opens files, creates the `country_lookup`, and delegates to `analyze`. The optional `--top-n N` flag is forwarded to `analyze` as `top_n`.
 
-### 4.7 Library Choices
+### 4.7 Top-N Truncation
+
+**Decision:** A pure post-processing function `truncate_report` sits between `accumulate` and the formatter. When the caller passes `top_n`, `analyze` applies this step; otherwise the pipeline is unchanged.
+
+| Option                       | Pros                                                         | Cons                                                     |
+| ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------------- |
+| **Post-process step (chosen)** | Works with any formatter, testable in isolation, non-invasive | The returned `FullReport` is lossy (tail entries collapsed) |
+| Inside the formatter         | `FullReport` stays complete                                  | Every custom formatter must re-implement truncation      |
+| Inside `accumulate`          | Single pass                                                  | Can't know the top-N until all records are counted       |
+
+The function keeps `CategoryBreakdown.total` unchanged so percentage calculations remain correct. If a dimension already contains a natural "Other" label (e.g. from unresolvable user-agents), its count is merged with the rollup to avoid a duplicate bucket.
+
+### 4.8 Library Choices
 
 Each concern maps to a well-established library; in every case the main alternative was hand-rolling with regex.
 
@@ -212,4 +225,3 @@ Each concern maps to a well-established library; in every case the main alternat
 **Assumptions:**
 
 - Single-pass aggregation (counts + percentages) is sufficient. Multi-pass analytics (medians, correlations, dependent sub-breakdowns) are out of scope.
-- We currently don't constrain maximum values per dimension in the output format.
