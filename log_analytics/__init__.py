@@ -4,6 +4,7 @@ from .types import (
     CategoryBreakdown,
     Extractor,
     ExtractorMap,
+    Formatter,
     FullReport,
     LogSummary,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "DEFAULT_EXTRACTORS",
     "Extractor",
     "ExtractorMap",
+    "Formatter",
     "FullReport",
     "LogSummary",
     "accumulate",

@@ -26,3 +26,5 @@ class FullReport:
 
 Extractor = Callable[[LogSummary], str]
 ExtractorMap = dict[str, Extractor]
+
+Formatter = Callable[["FullReport"], str]

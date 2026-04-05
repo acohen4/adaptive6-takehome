@@ -8,7 +8,7 @@ Build a module that reads an Apache Web Server log file and outputs a statistica
 
 - **Usability** — clean API surface; easy to call, easy to read output → [Public API](#32-public-api)
 - **Simplicity** — a linear pipeline is the simplest model for single-pass analytics; O(1) memory is a bonus → [Data Flow Model](#41-data-flow-model)
-- **Extensibility** — adding a new dimension should be a one-function change → [Extension Strategy](#43-extension-strategy-adding-new-dimensions)
+- **Extensibility** — adding a new dimension or output format should be a one-function change → [Extension Strategy](#43-extension-strategy-adding-new-dimensions), [Formatter Extensibility](#44-formatter-extensibility)
 - **Reliability** — errors are handled explicitly and surfaced, never silently swallowed → [Error Boundary Placement](#42-error-boundary-placement)
 
 ## 3. Interfaces & Data Structures
@@ -43,6 +43,8 @@ class FullReport:
 Extractor = Callable[[LogSummary], str]
 # e.g. {"OS": lambda s: s.os, "Browser": lambda s: s.browser}
 ExtractorMap = dict[str, Extractor]
+
+Formatter = Callable[[FullReport], str]
 ```
 
 ### 3.2 Public API
@@ -55,10 +57,11 @@ def analyze(
     country_lookup: CountryLookup,
     dest: IO[str] = sys.stdout,
     extractors: ExtractorMap = DEFAULT_EXTRACTORS,
+    formatter: Formatter = format_report,
 ) -> FullReport:
 ```
 
-Single entry point. `country_lookup` is a callback that maps an IP to a country name — the caller owns the GeoIP reader lifecycle (see [GeoIP Dependency Injection](#44-geoip-dependency-injection)).
+Single entry point. `country_lookup` is a callback that maps an IP to a country name — the caller owns the GeoIP reader lifecycle (see [GeoIP Dependency Injection](#45-geoip-dependency-injection)). `formatter` controls output serialisation; the default produces the human-readable text format (see [Formatter Extensibility](#44-formatter-extensibility)).
 
 ### 3.3 Pipeline Stages
 
@@ -73,13 +76,13 @@ format_report(report: FullReport) -> str
 
 `parse_line` receives a `country_lookup` callback rather than owning a GeoIP reader. The caller (typically `analyze`, which gets it from `__main__`) controls reader creation and lifecycle. Tests pass a stub: `lambda ip: {"1.2.3.4": "Germany"}.get(ip, "Unknown")`.
 
-`format_report` sorts each dimension's entries by count descending and formats percentages to two decimal places (`f"{pct:.2f}%"`), matching the required output spec.
+`format_report` is the default `Formatter`. It sorts each dimension's entries by count descending and formats percentages to two decimal places (`f"{pct:.2f}%"`), matching the required output spec. Callers can substitute any `Callable[[FullReport], str]` via the `formatter` parameter on `analyze`.
 
 ### 3.4 Exported Surface
 
-**Public:** `analyze`, `make_country_lookup`, all dataclasses/type aliases, `DEFAULT_EXTRACTORS`.
+**Public:** `analyze`, `make_country_lookup`, all dataclasses/type aliases, `DEFAULT_EXTRACTORS`, `Formatter`.
 
-**Advanced:** `parse_line`, `accumulate`, `format_report` — for testing and custom pipelines.
+**Advanced:** `parse_line`, `accumulate`, `format_report` (the default `Formatter`) — for testing and custom pipelines.
 
 ## 4. Design Dimensions
 
@@ -100,11 +103,11 @@ format_report(report: FullReport) -> str
                                                        └───────────────┘  (IO[str])
 ```
 
-| Option | Pros | Cons |
-|---|---|---|
+| Option                          | Pros                                              | Cons                              |
+| ------------------------------- | ------------------------------------------------- | --------------------------------- |
 | **Streaming pipeline (chosen)** | O(1) memory, testable pure stages, parallelizable | Harder to do multi-pass analytics |
-| Load-all-in-memory | Simple, random access | Memory-bound on large files |
-| Event-driven / callback | Flexible composition | Harder to reason about and test |
+| Load-all-in-memory              | Simple, random access                             | Memory-bound on large files       |
+| Event-driven / callback         | Flexible composition                              | Harder to reason about and test   |
 
 Each stage consumes an iterable and produces a typed output. Testability comes from pure functions, memory efficiency from lazy iteration. Multi-pass analytics aren't needed for percentage breakdowns, so streaming is a clear win.
 
@@ -112,11 +115,11 @@ Each stage consumes an iterable and produces a typed output. Testability comes f
 
 **Decision:** Errors concentrate at `parse_line`; bad lines become `None` + an increment to the error count.
 
-| Option | Pros | Cons |
-|---|---|---|
-| Fail-fast (raise on bad line) | Simple, no ambiguity | One bad line kills the whole report |
-| **Skip + count (chosen)** | Resilient, observable via `errors` count | Data loss if threshold not monitored |
-| Quarantine file | Full auditability, replay | More machinery than this problem needs |
+| Option                        | Pros                                     | Cons                                   |
+| ----------------------------- | ---------------------------------------- | -------------------------------------- |
+| Fail-fast (raise on bad line) | Simple, no ambiguity                     | One bad line kills the whole report    |
+| **Skip + count (chosen)**     | Resilient, observable via `errors` count | Data loss if threshold not monitored   |
+| Quarantine file               | Full auditability, replay                | More machinery than this problem needs |
 
 This gives two clean failure modes: data-quality issues (tracked, non-fatal) and IO failures (exceptional, propagated). Downstream stages can assume clean data.
 
@@ -124,11 +127,11 @@ This gives two clean failure modes: data-quality issues (tracked, non-fatal) and
 
 **Decision:** `ExtractorMap` drives both accumulation and report shape. `FullReport.dimensions` is a `dict[str, CategoryBreakdown]` keyed by the same strings as the extractor map, so adding a dimension means adding one entry to the extractor map — no core type changes.
 
-| Option | Pros | Cons |
-|---|---|---|
-| Named fields + extractors | Type-safe, discoverable, IDE-friendly | Must touch `FullReport` to add a dimension |
+| Option                                      | Pros                                                              | Cons                                                |
+| ------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------- |
+| Named fields + extractors                   | Type-safe, discoverable, IDE-friendly                             | Must touch `FullReport` to add a dimension          |
 | **`dict[str, CategoryBreakdown]` (chosen)** | Unlimited dimensions, no core changes, matches `ExtractorMap` 1:1 | No static field-level type safety; keys are strings |
-| Plugin/registry pattern | Fully decoupled | Way more machinery than three dimensions need |
+| Plugin/registry pattern                     | Fully decoupled                                                   | Way more machinery than three dimensions need       |
 
 String keys are an acceptable trade-off: the extractor map is the single source of truth for which dimensions exist, and the report's keys are always produced by the pipeline — never hand-typed by callers.
 
@@ -145,21 +148,49 @@ analyze(source, country_lookup, extractors={**DEFAULT_EXTRACTORS, "Method": lamb
 
 If extractor composition becomes common, a `with_extractors(extras, base=DEFAULT_EXTRACTORS)` helper could make it more ergonomic — but `{**DEFAULT_EXTRACTORS, ...}` is clear enough for v1.
 
-### 4.4 GeoIP Dependency Injection
+### 4.4 Formatter Extensibility
+
+**Decision:** `Formatter` callback mirrors the `ExtractorMap` pattern on the output side. `analyze` accepts a `formatter: Formatter = format_report` parameter, so swapping output format is a one-function change.
+
+| Option                             | Pros                                                                      | Cons                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Hardcoded text output (status quo) | Simple, no extra parameter                                                | Every new format means forking or wrapping `analyze` |
+| **`Formatter` callback (chosen)**  | One-function swap, mirrors `ExtractorMap` symmetry, zero pipeline changes | Slight API surface growth                            |
+
+The `Formatter` only consumes a `FullReport`, so it is fully decoupled from parsing and accumulation — exactly like how `accumulate` only consumes an `ExtractorMap`. This symmetry keeps the pipeline a clean sequence of pluggable stages.
+
+Adding a JSON output format requires one function, zero pipeline changes:
+
+```python
+import json
+
+def json_formatter(report: FullReport) -> str:
+    return json.dumps({
+        dim: {
+            label: round(count / bd.total * 100, 2)
+            for label, count in bd.counts.items()
+        }
+        for dim, bd in report.dimensions.items()
+    }, indent=2)
+
+analyze(source, country_lookup, formatter=json_formatter)
+```
+
+### 4.5 GeoIP Dependency Injection
 
 **Decision:** `country_lookup` callback — `parse_line` and `analyze` receive a `Callable[[str], str]` instead of owning a GeoIP reader.
 
 A `make_country_lookup(db_path)` factory opens the MaxMind DB and returns a closure. The CLI creates it; tests substitute a stub dict.
 
-| Option | Pros | Cons |
-|---|---|---|
-| Global singleton + env var | Zero-arg `analyze()` calls | Import-order sensitive, hard to test in parallel, hidden state |
-| `make_parser` factory (returns closure) | No global state, self-contained | Extra abstraction layer for one dependency |
-| **`country_lookup` callback (chosen)** | Minimal API surface, tests already use it, caller owns lifecycle | GeoIP setup leaks to the call site |
+| Option                                  | Pros                                                             | Cons                                                           |
+| --------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| Global singleton + env var              | Zero-arg `analyze()` calls                                       | Import-order sensitive, hard to test in parallel, hidden state |
+| `make_parser` factory (returns closure) | No global state, self-contained                                  | Extra abstraction layer for one dependency                     |
+| **`country_lookup` callback (chosen)**  | Minimal API surface, tests already use it, caller owns lifecycle | GeoIP setup leaks to the call site                             |
 
 The callback won over the factory because `parse_line` already needed a `country_lookup` parameter for testability — promoting it to `analyze`'s signature removes all global state with no new abstractions.
 
-### 4.5 CLI Entry Point
+### 4.6 CLI Entry Point
 
 A thin `__main__.py` wires up argument parsing and calls `analyze`:
 
@@ -169,41 +200,43 @@ python -m log_analytics apache_log.txt --db GeoLite2-Country.mmdb
 
 The CLI parses args, opens files, creates the `country_lookup`, and delegates to `analyze`.
 
-### 4.6 Parsing Strategy
+### 4.7 Parsing Strategy
 
 **Decision:** `apache-log-parser` — a log parser exists, so we use it.
 
-| Option | Pros | Cons |
-|---|---|---|
-| Regex | Precise, handles edge cases | Harder to read and maintain |
-| `str.split` | Simple | Fragile with quoted strings, spaces in user-agent |
-| **`apache-log-parser` (chosen)** | Battle-tested, handles format variants | External dependency |
+| Option                           | Pros                                   | Cons                                              |
+| -------------------------------- | -------------------------------------- | ------------------------------------------------- |
+| Regex                            | Precise, handles edge cases            | Harder to read and maintain                       |
+| `str.split`                      | Simple                                 | Fragile with quoted strings, spaces in user-agent |
+| **`apache-log-parser` (chosen)** | Battle-tested, handles format variants | External dependency                               |
 
-### 4.7 User-Agent Resolution
+### 4.8 User-Agent Resolution
 
 **Decision:** `ua-parser` — best coverage of the lightweight options.
 
-| Option | Pros | Cons |
-|---|---|---|
-| `user-agents` | Lightweight, simple API | May lack coverage for edge cases |
-| **`ua-parser` (chosen)** | Comprehensive, well-maintained regex DB | Heavier dependency |
-| Manual regex | No dependencies | Maintenance burden, poor coverage |
+| Option                   | Pros                                    | Cons                              |
+| ------------------------ | --------------------------------------- | --------------------------------- |
+| `user-agents`            | Lightweight, simple API                 | May lack coverage for edge cases  |
+| **`ua-parser` (chosen)** | Comprehensive, well-maintained regex DB | Heavier dependency                |
+| Manual regex             | No dependencies                         | Maintenance burden, poor coverage |
 
-### 4.8 GeoIP Lookup
+### 4.9 GeoIP Lookup
 
 **Decision:** `geoip2` + MaxMind DB — offline, fast, industry standard.
 
-| Option | Pros | Cons |
-|---|---|---|
-| **`geoip2` + MaxMind DB (chosen)** | Industry standard, offline, fast | Requires DB file download |
-| IP-to-country API | No local DB needed | Network dependency, rate limits, latency |
-| Bundled CSV lookup | Simple, no external deps | Stale data, poor coverage |
+| Option                             | Pros                             | Cons                                     |
+| ---------------------------------- | -------------------------------- | ---------------------------------------- |
+| **`geoip2` + MaxMind DB (chosen)** | Industry standard, offline, fast | Requires DB file download                |
+| IP-to-country API                  | No local DB needed               | Network dependency, rate limits, latency |
+| Bundled CSV lookup                 | Simple, no external deps         | Stale data, poor coverage                |
 
 ## 5. Assumptions & Open Questions
 
 **Assumptions:**
+
 - Single-pass aggregation (counts + percentages) is sufficient. Multi-pass analytics (medians, correlations, dependent sub-breakdowns) are out of scope.
 
 **Open questions:**
+
 - [ ] Error threshold that aborts the report if too many lines are malformed?
 - [ ] Do we constrain allowed values per dimension (e.g. known OS list), or accept whatever the parser returns?

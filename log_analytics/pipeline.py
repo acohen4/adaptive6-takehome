@@ -8,6 +8,7 @@ from .parser import parse_line, CountryLookup
 from .types import (
     CategoryBreakdown,
     ExtractorMap,
+    Formatter,
     FullReport,
     LogSummary,
 )
@@ -69,9 +70,10 @@ def analyze(
     country_lookup: CountryLookup,
     dest: IO[str] = sys.stdout,
     extractors: ExtractorMap = DEFAULT_EXTRACTORS,
+    formatter: Formatter = format_report,
 ) -> FullReport:
     records = (parse_line(line, country_lookup=country_lookup) for line in read_lines(source))
     report = accumulate(records, extractors)
-    dest.write(format_report(report))
+    dest.write(formatter(report))
     dest.write("\n")
     return report
