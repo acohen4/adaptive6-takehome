@@ -71,12 +71,9 @@ Each stage has a single responsibility and communicates through the types above.
 read_lines(source: IO[str]) -> Iterable[str]
 parse_line(raw: str, country_lookup: CountryLookup) -> LogSummary | None
 accumulate(records: Iterable[LogSummary | None], extractors: ExtractorMap) -> FullReport
+truncate_report(report: FullReport, top_n: int) -> FullReport
 format_report(report: FullReport) -> str
 ```
-
-`parse_line` receives a `country_lookup` callback rather than owning a GeoIP reader. The caller (typically `analyze`, which gets it from `__main__`) controls reader creation and lifecycle. Tests pass a stub: `lambda ip: {"1.2.3.4": "Germany"}.get(ip, "Unknown")`.
-
-`format_report` is the default `Formatter`. It sorts each dimension's entries by count descending and formats percentages to two decimal places (`f"{pct:.2f}%"`), matching the required output spec. Callers can substitute any `Callable[[FullReport], str]` via the `formatter` parameter on `analyze`.
 
 ### 3.4 Exported Surface
 
@@ -93,14 +90,14 @@ format_report(report: FullReport) -> str
 ```
                                     country_lookup
                                         │
-┌────────────┐    ┌────────────┐    ┌───▼─────────┐    ┌───────────────┐    ┌──────┐
-│ log file   │───▶│ read_lines │───▶│ parse_line  │───▶│  accumulate   │───▶│format│
-│ (IO[str])  │    │ Iterable   │    │ LogSummary? │    │  FullReport   │    │report│
-└────────────┘    │ [str]      │    │             │    │               │    └──┬───┘
-                  └────────────┘    └─────────────┘    │ ExtractorMap  │       │
-                                                       │ drives which  │       ▼
-                                                       │ dims to count │    dest
-                                                       └───────────────┘  (IO[str])
+┌────────────┐    ┌────────────┐    ┌───▼─────────┐    ┌───────────────┐    ┌──────────┐    ┌──────┐
+│ log file   │───▶│ read_lines │───▶│ parse_line  │───▶│  accumulate   │───▶│ truncate │───▶│format│
+│ (IO[str])  │    │ Iterable   │    │ LogSummary? │    │  FullReport   │    │ (opt.)   │    │report│
+└────────────┘    │ [str]      │    │             │    │               │    └──────────┘    └──┬───┘
+                  └────────────┘    └─────────────┘    │ ExtractorMap  │                       │
+                                                       │ drives which  │                       ▼
+                                                       │ dims to count │                    dest
+                                                       └───────────────┘                  (IO[str])
 ```
 
 | Option                          | Pros                                              | Cons                              |
@@ -200,35 +197,15 @@ python -m log_analytics apache_log.txt --db GeoLite2-Country.mmdb
 
 The CLI parses args, opens files, creates the `country_lookup`, and delegates to `analyze`.
 
-### 4.7 Parsing Strategy
+### 4.7 Library Choices
 
-**Decision:** `apache-log-parser` — a log parser exists, so we use it.
+Each concern maps to a well-established library; in every case the main alternative was hand-rolling with regex.
 
-| Option                           | Pros                                   | Cons                                              |
-| -------------------------------- | -------------------------------------- | ------------------------------------------------- |
-| Regex                            | Precise, handles edge cases            | Harder to read and maintain                       |
-| `str.split`                      | Simple                                 | Fragile with quoted strings, spaces in user-agent |
-| **`apache-log-parser` (chosen)** | Battle-tested, handles format variants | External dependency                               |
-
-### 4.8 User-Agent Resolution
-
-**Decision:** `ua-parser` — best coverage of the lightweight options.
-
-| Option                   | Pros                                    | Cons                              |
-| ------------------------ | --------------------------------------- | --------------------------------- |
-| `user-agents`            | Lightweight, simple API                 | May lack coverage for edge cases  |
-| **`ua-parser` (chosen)** | Comprehensive, well-maintained regex DB | Heavier dependency                |
-| Manual regex             | No dependencies                         | Maintenance burden, poor coverage |
-
-### 4.9 GeoIP Lookup
-
-**Decision:** `geoip2` + MaxMind DB — offline, fast, industry standard.
-
-| Option                             | Pros                             | Cons                                     |
-| ---------------------------------- | -------------------------------- | ---------------------------------------- |
-| **`geoip2` + MaxMind DB (chosen)** | Industry standard, offline, fast | Requires DB file download                |
-| IP-to-country API                  | No local DB needed               | Network dependency, rate limits, latency |
-| Bundled CSV lookup                 | Simple, no external deps         | Stale data, poor coverage                |
+| Concern           | Chosen library                | Why                                      | Main alternative trade-off                        |
+| ----------------- | ----------------------------- | ---------------------------------------- | ------------------------------------------------- |
+| Log parsing       | `apache-log-parser`           | Battle-tested, handles format variants   | Regex: precise but harder to read and maintain    |
+| User-agent resolution | `ua-parser`               | Comprehensive, well-maintained regex DB  | `user-agents`: lighter but weaker edge-case coverage |
+| GeoIP lookup      | `geoip2` + MaxMind DB         | Industry standard, offline, fast         | IP-to-country API: no local DB but adds network dependency and latency |
 
 ## 5. Assumptions & Open Questions
 
