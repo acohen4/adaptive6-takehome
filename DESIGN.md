@@ -27,7 +27,7 @@ class LogSummary:
     country: str
 ```
 
-`LogSummary` intentionally conflates raw parsing (extracting the IP and user-agent string) with enrichment (resolving IP → country, user-agent → OS/browser). A purer design would separate these into a `RawLogEntry` and an enrichment step, but for three dimensions the extra indirection isn't worth it. If enrichment logic grows (e.g. ASN lookup, bot detection), splitting the stages would be the natural next refactor.
+`LogSummary` intentionally conflates raw parsing (extracting the IP and user-agent string) with enrichment (resolving IP → country, user-agent → OS/browser). A purer design would separate these into a `RawLogEntry` and an enrichment step, but for three dimensions the extra indirection isn't worth it. If enrichment logic grows, splitting the stages would be the natural next refactor.
 
 ```python
 @dataclass
@@ -113,7 +113,7 @@ Each stage consumes an iterable and produces a typed output. Testability comes f
 
 ### 4.2 Error Boundary Placement
 
-**Decision:** Errors concentrate at `parse_line`; bad lines become `None` + an increment to the error count.
+**Decision:** Errors concentrate at `parse_line`; bad lines become `None` + an increment to the error count. Since this is a log statistical tool, we assume the data isn't totally clean and therefore shouldn't fail on bad log entries.
 
 | Option                        | Pros                                     | Cons                                   |
 | ----------------------------- | ---------------------------------------- | -------------------------------------- |
@@ -125,7 +125,7 @@ This gives two clean failure modes: data-quality issues (tracked, non-fatal) and
 
 ### 4.3 Extension Strategy (Adding New Dimensions)
 
-**Decision:** `ExtractorMap` drives both accumulation and report shape. `FullReport.dimensions` is a `dict[str, CategoryBreakdown]` keyed by the same strings as the extractor map, so adding a dimension means adding one entry to the extractor map — no core type changes.
+**Decision:** `ExtractorMap` drives both accumulation and report shape. `FullReport.dimensions` is a `dict[str, CategoryBreakdown]` keyed by the same strings as the extractor map, so adding a dimension means adding one entry to the extractor map, without needing to make any core type changes.
 
 | Option                                      | Pros                                                              | Cons                                                |
 | ------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------- |
@@ -157,7 +157,7 @@ If extractor composition becomes common, a `with_extractors(extras, base=DEFAULT
 | Hardcoded text output (status quo) | Simple, no extra parameter                                                | Every new format means forking or wrapping `analyze` |
 | **`Formatter` callback (chosen)**  | One-function swap, mirrors `ExtractorMap` symmetry, zero pipeline changes | Slight API surface growth                            |
 
-The `Formatter` only consumes a `FullReport`, so it is fully decoupled from parsing and accumulation — exactly like how `accumulate` only consumes an `ExtractorMap`. This symmetry keeps the pipeline a clean sequence of pluggable stages.
+The `Formatter` only consumes a `FullReport`, so it is fully decoupled from parsing and accumulation. This symmetry keeps the pipeline a clean sequence of pluggable stages.
 
 Adding a JSON output format requires one function, zero pipeline changes:
 
@@ -188,7 +188,7 @@ A `make_country_lookup(db_path)` factory opens the MaxMind DB and returns a clos
 | `make_parser` factory (returns closure) | No global state, self-contained                                  | Extra abstraction layer for one dependency                     |
 | **`country_lookup` callback (chosen)**  | Minimal API surface, tests already use it, caller owns lifecycle | GeoIP setup leaks to the call site                             |
 
-The callback won over the factory because `parse_line` already needed a `country_lookup` parameter for testability — promoting it to `analyze`'s signature removes all global state with no new abstractions.
+The callback won over the factory because `parse_line` already needed a `country_lookup` parameter for testability. Promoting it to `analyze`'s signature removes all global state with no new abstractions.
 
 ### 4.6 CLI Entry Point
 
@@ -235,8 +235,4 @@ The CLI parses args, opens files, creates the `country_lookup`, and delegates to
 **Assumptions:**
 
 - Single-pass aggregation (counts + percentages) is sufficient. Multi-pass analytics (medians, correlations, dependent sub-breakdowns) are out of scope.
-
-**Open questions:**
-
-- [ ] Error threshold that aborts the report if too many lines are malformed?
-- [ ] Do we constrain allowed values per dimension (e.g. known OS list), or accept whatever the parser returns?
+- We currently don't constrain maximum values per dimension in the output format.
