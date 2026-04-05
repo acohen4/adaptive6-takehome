@@ -74,7 +74,7 @@ def format_report(report: FullReport) -> str:
         )
         for label, count in sorted_items:
             pct = (count / breakdown.total * 100) if breakdown.total else 0.0
-            lines.append(f"  {label} {pct:.2f}%")
+            lines.append(f"{label} {pct:.2f}%")
         sections.append("\n".join(lines))
 
     return "\n\n".join(sections)
