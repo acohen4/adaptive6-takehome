@@ -202,11 +202,11 @@ The CLI parses args, opens files, creates the `country_lookup`, and delegates to
 
 **Decision:** A pure post-processing function `truncate_report` sits between `accumulate` and the formatter. When the caller passes `top_n`, `analyze` applies this step; otherwise the pipeline is unchanged.
 
-| Option                       | Pros                                                         | Cons                                                     |
-| ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------------- |
+| Option                         | Pros                                                          | Cons                                                        |
+| ------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------- |
 | **Post-process step (chosen)** | Works with any formatter, testable in isolation, non-invasive | The returned `FullReport` is lossy (tail entries collapsed) |
-| Inside the formatter         | `FullReport` stays complete                                  | Every custom formatter must re-implement truncation      |
-| Inside `accumulate`          | Single pass                                                  | Can't know the top-N until all records are counted       |
+| Inside the formatter           | `FullReport` stays complete                                   | Every custom formatter must re-implement truncation         |
+| Inside `accumulate`            | Single pass                                                   | Can't know the top-N until all records are counted          |
 
 The function keeps `CategoryBreakdown.total` unchanged so percentage calculations remain correct. If a dimension already contains a natural "Other" label (e.g. from unresolvable user-agents), its count is merged with the rollup to avoid a duplicate bucket.
 
@@ -214,11 +214,21 @@ The function keeps `CategoryBreakdown.total` unchanged so percentage calculation
 
 Each concern maps to a well-established library; in every case the main alternative was hand-rolling with regex.
 
-| Concern           | Chosen library                | Why                                      | Main alternative trade-off                        |
-| ----------------- | ----------------------------- | ---------------------------------------- | ------------------------------------------------- |
-| Log parsing       | `apache-log-parser`           | Battle-tested, handles format variants   | Regex: precise but harder to read and maintain    |
-| User-agent resolution | `ua-parser`               | Comprehensive, well-maintained regex DB  | `user-agents`: lighter but weaker edge-case coverage |
-| GeoIP lookup      | `geoip2` + MaxMind DB         | Industry standard, offline, fast         | IP-to-country API: no local DB but adds network dependency and latency |
+| Concern               | Chosen library        | Why                                     | Main alternative trade-off                                             |
+| --------------------- | --------------------- | --------------------------------------- | ---------------------------------------------------------------------- |
+| Log parsing           | `apache-log-parser`   | Battle-tested, handles format variants  | Regex: precise but harder to read and maintain                         |
+| User-agent resolution | `ua-parser`           | Comprehensive, well-maintained regex DB | `user-agents`: lighter but weaker edge-case coverage                   |
+| GeoIP lookup          | `geoip2` + MaxMind DB | Industry standard, offline, fast        | IP-to-country API: no local DB but adds network dependency and latency |
+
+### 4.9 Scaling Considerations
+
+A potential bottleneck in throughput is input size. If the workload grows, we could increase throughput by parallelizing processing.
+
+**Upstream splitting (easiest win).** Before touching pipeline code, shard at the infrastructure level: split logs and run independent `analyze` calls per shard. Merge the resulting `FullReport`s with element-wise addition of `CategoryBreakdown.counts`. Zero code change to the pipeline itself.
+
+**In-process parallelism.** Because `accumulate` just increments `dict[str, int]` counters, the work is trivially partitionable: split input lines across workers, accumulate per chunk, then merge. A `merge_reports(list[FullReport]) -> FullReport` function is the only new code required.
+
+For the current scope (single file, CLI tool) none of this is needed, but the streaming + pure-function architecture keeps the scaling path open without a rewrite.
 
 ## 5. Assumptions & Open Questions
 
