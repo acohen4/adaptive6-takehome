@@ -20,10 +20,17 @@ source .venv/bin/activate
 python -m log_analytics apache_log.txt
 ```
 
-To use a different GeoIP database:
+Options:
 
 ```bash
+# Use a different GeoIP database
 python -m log_analytics apache_log.txt --db /path/to/GeoLite2-Country.mmdb
+
+# Show only the top 5 entries per dimension (rest rolled into "Other")
+python -m log_analytics apache_log.txt --top-n 5
+
+# Log parse errors to stderr
+python -m log_analytics apache_log.txt -v
 ```
 
 ## Tests

@@ -87,8 +87,9 @@ def analyze(
     extractors: ExtractorMap = DEFAULT_EXTRACTORS,
     formatter: Formatter = format_report,
     top_n: int | None = None,
+    verbose: bool = False,
 ) -> FullReport:
-    records = (parse_line(line, country_lookup=country_lookup) for line in read_lines(source))
+    records = (parse_line(line, country_lookup=country_lookup, verbose=verbose) for line in read_lines(source))
     report = accumulate(records, extractors)
     if top_n is not None:
         report = truncate_report(report, top_n)

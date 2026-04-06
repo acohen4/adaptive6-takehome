@@ -38,6 +38,7 @@ def make_country_lookup(db_path: str | Path = DEFAULT_DB_PATH) -> CountryLookup:
 def parse_line(
     raw: str,
     country_lookup: CountryLookup,
+    verbose: bool = False,
 ) -> LogSummary | None:
     """Parse one raw Apache Combined log line into a LogSummary.
 
@@ -46,7 +47,8 @@ def parse_line(
     try:
         parsed = _line_parser(raw.strip())
     except Exception:
-        logger.warning("Failed to parse log line: %s", raw)
+        if verbose:
+            logger.warning("Failed to parse log line: %s", raw)
         return None
 
     try:
@@ -55,7 +57,8 @@ def parse_line(
         os_family = ua_result.os.family if ua_result.os else "Other"
         browser_family = ua_result.user_agent.family if ua_result.user_agent else "Other"
     except Exception:
-        logger.warning("Failed to parse user-agent: %s", ua_string)
+        if verbose:
+            logger.warning("Failed to parse user-agent: %s", ua_string)
         os_family = "Other"
         browser_family = "Other"
 
@@ -63,7 +66,8 @@ def parse_line(
         ip = parsed["remote_host"]
         country = country_lookup(ip)
     except Exception:
-        logger.warning("Failed geo lookup for IP: %s", parsed.get("remote_host", "?"))
+        if verbose:
+            logger.warning("Failed geo lookup for IP: %s", parsed.get("remote_host", "?"))
         return None
 
     return LogSummary(ip=ip, os=os_family, browser=browser_family, country=country)
